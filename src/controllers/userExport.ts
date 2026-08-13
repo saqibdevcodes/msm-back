@@ -1,0 +1,914 @@
+import type { Request, Response } from "express";
+import ExcelJS from "exceljs";
+
+import { prisma } from "../lib/prisma.ts";
+
+type ProjectStatus = "Not started" | "In progress" | "Completed" | "Overdue";
+
+const EXCEL_MIME_TYPE =
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+const HEADER_FILL = "1F4E78";
+const TITLE_FILL = "0F172A";
+const WHITE = "FFFFFF";
+const BORDER_COLOR = "D0D5DD";
+
+const formatDateForFileName = (date: Date) =>
+  date.toISOString().replace(/[:.]/g, "-").slice(0, 19);
+
+const calculatePercentage = (value: number, total: number) => {
+  if (total <= 0) return 0;
+
+  return Number(((value / total) * 100).toFixed(2));
+};
+
+const getProjectStatus = (project: {
+  deadline: Date;
+  target: number;
+  completed: number;
+}): ProjectStatus => {
+  if (project.target > 0 && project.completed >= project.target) {
+    return "Completed";
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const deadline = new Date(project.deadline);
+  deadline.setHours(0, 0, 0, 0);
+
+  if (deadline.getTime() < today.getTime()) {
+    return "Overdue";
+  }
+
+  if (project.completed <= 0) {
+    return "Not started";
+  }
+
+  return "In progress";
+};
+
+const normalizeStringQuery = (value: unknown) => {
+  if (typeof value !== "string") return undefined;
+
+  const normalized = value.trim();
+  return normalized || undefined;
+};
+
+const normalizeIds = (value: unknown): string[] => {
+  if (typeof value !== "string") return [];
+
+  return Array.from(
+    new Set(
+      value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+};
+
+const styleWorksheet = (
+  worksheet: ExcelJS.Worksheet,
+  title: string,
+  subtitle: string,
+  columnWidths: number[],
+) => {
+  const lastColumn = Math.max(worksheet.columnCount, columnWidths.length, 1);
+  const lastColumnLetter = worksheet.getColumn(lastColumn).letter;
+
+  worksheet.spliceRows(1, 0, [], [], []);
+  worksheet.mergeCells(`A1:${lastColumnLetter}1`);
+  worksheet.mergeCells(`A2:${lastColumnLetter}2`);
+
+  const titleCell = worksheet.getCell("A1");
+  titleCell.value = title;
+  titleCell.font = {
+    bold: true,
+    size: 16,
+    color: { argb: WHITE },
+  };
+  titleCell.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: TITLE_FILL },
+  };
+  titleCell.alignment = {
+    vertical: "middle",
+    horizontal: "left",
+  };
+
+  const subtitleCell = worksheet.getCell("A2");
+  subtitleCell.value = subtitle;
+  subtitleCell.font = {
+    italic: true,
+    size: 10,
+    color: { argb: "475467" },
+  };
+  subtitleCell.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "F8FAFC" },
+  };
+
+  worksheet.getRow(1).height = 26;
+  worksheet.getRow(2).height = 21;
+
+  const headerRow = worksheet.getRow(4);
+  headerRow.height = 24;
+  headerRow.font = {
+    bold: true,
+    color: { argb: WHITE },
+  };
+  headerRow.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: HEADER_FILL },
+  };
+  headerRow.alignment = {
+    vertical: "middle",
+    horizontal: "center",
+    wrapText: true,
+  };
+
+  headerRow.eachCell((cell) => {
+    cell.border = {
+      top: { style: "thin", color: { argb: BORDER_COLOR } },
+      left: { style: "thin", color: { argb: BORDER_COLOR } },
+      bottom: { style: "thin", color: { argb: BORDER_COLOR } },
+      right: { style: "thin", color: { argb: BORDER_COLOR } },
+    };
+  });
+
+  worksheet.views = [
+    {
+      state: "frozen",
+      ySplit: 4,
+      xSplit: 0,
+    },
+  ];
+
+  worksheet.autoFilter = {
+    from: { row: 4, column: 1 },
+    to: { row: 4, column: lastColumn },
+  };
+
+  columnWidths.forEach((width, index) => {
+    worksheet.getColumn(index + 1).width = width;
+  });
+
+  worksheet.eachRow((row, rowNumber) => {
+    if (rowNumber <= 4) return;
+
+    row.alignment = {
+      vertical: "top",
+      wrapText: true,
+    };
+
+    row.eachCell((cell) => {
+      cell.border = {
+        top: { style: "thin", color: { argb: "EAECF0" } },
+        left: { style: "thin", color: { argb: "EAECF0" } },
+        bottom: { style: "thin", color: { argb: "EAECF0" } },
+        right: { style: "thin", color: { argb: "EAECF0" } },
+      };
+    });
+
+    if (rowNumber % 2 === 1) {
+      row.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "F9FAFB" },
+      };
+    }
+  });
+};
+
+const addExportInfoSheet = (
+  workbook: ExcelJS.Workbook,
+  details: {
+    generatedAt: Date;
+    generatedBy: string;
+    search?: string;
+    status?: string;
+    role?: string;
+    selectedIds: string[];
+    userCount: number;
+  },
+) => {
+  const worksheet = workbook.addWorksheet("Export Information");
+
+  worksheet.columns = [
+    { header: "Field", key: "field", width: 30 },
+    { header: "Value", key: "value", width: 80 },
+  ];
+
+  worksheet.addRows([
+    {
+      field: "Report",
+      value: "Complete User Management Export",
+    },
+    {
+      field: "Generated At",
+      value: details.generatedAt,
+    },
+    {
+      field: "Generated By",
+      value: details.generatedBy,
+    },
+    {
+      field: "Search Filter",
+      value: details.search || "All",
+    },
+    {
+      field: "Status Filter",
+      value: details.status || "All",
+    },
+    {
+      field: "Role Filter",
+      value: details.role || "All",
+    },
+    {
+      field: "Selected User IDs",
+      value:
+        details.selectedIds.length > 0
+          ? details.selectedIds.join(", ")
+          : "All matching users",
+    },
+    {
+      field: "Exported Users",
+      value: details.userCount,
+    },
+    {
+      field: "Security Note",
+      value:
+        "Passwords, password hashes, authentication tokens and other credentials are intentionally excluded.",
+    },
+  ]);
+
+  styleWorksheet(
+    worksheet,
+    "User Management Export",
+    "This workbook was generated by the backend and contains user accounts, assignments, progress history and performance records.",
+    [30, 80],
+  );
+
+  worksheet.getColumn(2).numFmt = "@";
+  worksheet.getCell("B6").numFmt = "dd mmm yyyy, hh:mm";
+};
+
+export const exportUsersExcel = async (req: Request, res: Response) => {
+  try {
+    const search = normalizeStringQuery(req.query.search);
+    const status = normalizeStringQuery(req.query.status);
+    const role = normalizeStringQuery(req.query.role);
+    const selectedIds = normalizeIds(req.query.ids);
+
+    const where: any = {};
+
+    if (selectedIds.length > 0) {
+      where.id = {
+        in: selectedIds,
+      };
+    }
+
+    if (status === "active" || status === "inactive") {
+      where.status = status;
+    }
+
+    if (role === "admin" || role === "user" || role === "field") {
+      where.role = role;
+    }
+
+    if (search) {
+      where.OR = [
+        {
+          name: {
+            contains: search,
+            mode: "insensitive",
+          },
+        },
+        {
+          email: {
+            contains: search,
+            mode: "insensitive",
+          },
+        },
+      ];
+    }
+
+    const users = await prisma.user.findMany({
+      where,
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        status: true,
+        createdAt: true,
+        updatedAt: true,
+
+        projects: {
+          select: {
+            id: true,
+            assignedAt: true,
+            project: {
+              select: {
+                id: true,
+                name: true,
+                description: true,
+                deadline: true,
+                target: true,
+                received: true,
+                completed: true,
+                competition: true,
+                competitionTarget: true,
+                competitionReceived: true,
+                competitionCompleted: true,
+                createdAt: true,
+                updatedAt: true,
+              },
+            },
+          },
+          orderBy: {
+            assignedAt: "desc",
+          },
+        },
+
+        progressEntries: {
+          select: {
+            id: true,
+            projectId: true,
+            userId: true,
+            createdById: true,
+            category: true,
+            quantity: true,
+            workDate: true,
+            note: true,
+            source: true,
+            status: true,
+            clientRequestId: true,
+            targetSnapshot: true,
+            receivedSnapshot: true,
+            completedBefore: true,
+            completedAfter: true,
+            submittedIp: true,
+            submittedUserAgent: true,
+            voidedAt: true,
+            voidedById: true,
+            voidReason: true,
+            createdAt: true,
+            updatedAt: true,
+
+            project: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+
+            createdBy: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+
+            voidedBy: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+          },
+          orderBy: [{ workDate: "desc" }, { createdAt: "desc" }],
+        },
+
+        performances: {
+          select: {
+            id: true,
+            projectId: true,
+            totalScore: true,
+            remarks: true,
+            evaluatedAt: true,
+            createdAt: true,
+            updatedAt: true,
+
+            project: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+
+            answers: {
+              select: {
+                id: true,
+                score: true,
+                remark: true,
+                createdAt: true,
+                updatedAt: true,
+                question: {
+                  select: {
+                    id: true,
+                    question: true,
+                    maxScore: true,
+                  },
+                },
+              },
+              orderBy: {
+                createdAt: "asc",
+              },
+            },
+          },
+          orderBy: {
+            evaluatedAt: "desc",
+          },
+        },
+      },
+      orderBy: [{ name: "asc" }, { email: "asc" }],
+    });
+
+    const workbook = new ExcelJS.Workbook();
+
+    workbook.creator = "Project Management System";
+    workbook.lastModifiedBy = "Project Management System";
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    workbook.company = "Iris Communications";
+    workbook.subject = "Complete user management export";
+    workbook.title = "User Management Export";
+    workbook.description =
+      "Backend-generated export containing users, project assignments, progress history, performance reviews and performance answers.";
+
+    const generatedAt = new Date();
+    const authenticatedUser = (req as any).user;
+    const generatedBy =
+      authenticatedUser?.email ||
+      authenticatedUser?.userId ||
+      authenticatedUser?.id ||
+      "Authenticated administrator";
+
+    addExportInfoSheet(workbook, {
+      generatedAt,
+      generatedBy,
+      search,
+      status,
+      role,
+      selectedIds,
+      userCount: users.length,
+    });
+
+    const summarySheet = workbook.addWorksheet("Users Summary");
+    summarySheet.columns = [
+      { header: "User ID", key: "userId" },
+      { header: "Name", key: "name" },
+      { header: "Email", key: "email" },
+      { header: "Role", key: "role" },
+      { header: "Status", key: "status" },
+      { header: "Created At", key: "createdAt" },
+      { header: "Updated At", key: "updatedAt" },
+      { header: "Assigned Projects", key: "assignedProjects" },
+      { header: "Active Projects", key: "activeProjects" },
+      { header: "Completed Projects", key: "completedProjects" },
+      { header: "Overdue Projects", key: "overdueProjects" },
+      { header: "Total Target", key: "totalTarget" },
+      { header: "Total Received", key: "totalReceived" },
+      { header: "Project Completed", key: "projectCompleted" },
+      { header: "User Project Contribution", key: "userContribution" },
+      {
+        header: "User Competition Contribution",
+        key: "competitionContribution",
+      },
+      { header: "Progress Entries", key: "progressEntries" },
+      { header: "Performance Reviews", key: "performanceReviews" },
+      { header: "Average Performance %", key: "averagePerformance" },
+      { header: "Last Assignment", key: "lastAssignment" },
+      { header: "Last Progress Entry", key: "lastProgress" },
+      { header: "Last Performance Review", key: "lastReview" },
+    ];
+
+    const assignmentSheet = workbook.addWorksheet("Project Assignments");
+    assignmentSheet.columns = [
+      { header: "Assignment ID", key: "assignmentId" },
+      { header: "Assigned At", key: "assignedAt" },
+      { header: "User ID", key: "userId" },
+      { header: "User Name", key: "userName" },
+      { header: "User Email", key: "userEmail" },
+      { header: "Role", key: "role" },
+      { header: "User Status", key: "userStatus" },
+      { header: "Project ID", key: "projectId" },
+      { header: "Project Name", key: "projectName" },
+      { header: "Description", key: "description" },
+      { header: "Deadline", key: "deadline" },
+      { header: "Project Status", key: "projectStatus" },
+      { header: "Target", key: "target" },
+      { header: "Received", key: "received" },
+      { header: "Completed", key: "completed" },
+      { header: "Progress %", key: "progress" },
+      { header: "Remaining Received", key: "remainingReceived" },
+      { header: "Competition", key: "competition" },
+      { header: "Competition Target", key: "competitionTarget" },
+      { header: "Competition Received", key: "competitionReceived" },
+      { header: "Competition Completed", key: "competitionCompleted" },
+      { header: "Competition Progress %", key: "competitionProgress" },
+      { header: "Project Created At", key: "projectCreatedAt" },
+      { header: "Project Updated At", key: "projectUpdatedAt" },
+    ];
+
+    const progressSheet = workbook.addWorksheet("Progress History");
+    progressSheet.columns = [
+      { header: "Entry ID", key: "entryId" },
+      { header: "Work Date", key: "workDate" },
+      { header: "Submitted At", key: "submittedAt" },
+      { header: "Updated At", key: "updatedAt" },
+      { header: "User ID", key: "userId" },
+      { header: "User Name", key: "userName" },
+      { header: "User Email", key: "userEmail" },
+      { header: "Project ID", key: "projectId" },
+      { header: "Project Name", key: "projectName" },
+      { header: "Category", key: "category" },
+      { header: "Quantity", key: "quantity" },
+      { header: "Source", key: "source" },
+      { header: "Status", key: "status" },
+      { header: "Target Snapshot", key: "targetSnapshot" },
+      { header: "Received Snapshot", key: "receivedSnapshot" },
+      { header: "Completed Before", key: "completedBefore" },
+      { header: "Completed After", key: "completedAfter" },
+      { header: "Note", key: "note" },
+      { header: "Client Request ID", key: "clientRequestId" },
+      { header: "Created By ID", key: "createdById" },
+      { header: "Created By Name", key: "createdByName" },
+      { header: "Created By Email", key: "createdByEmail" },
+      { header: "Submitted IP", key: "submittedIp" },
+      { header: "Submitted User Agent", key: "submittedUserAgent" },
+      { header: "Voided At", key: "voidedAt" },
+      { header: "Voided By ID", key: "voidedById" },
+      { header: "Voided By Name", key: "voidedByName" },
+      { header: "Voided By Email", key: "voidedByEmail" },
+      { header: "Void Reason", key: "voidReason" },
+    ];
+
+    const reviewSheet = workbook.addWorksheet("Performance Reviews");
+    reviewSheet.columns = [
+      { header: "Review ID", key: "reviewId" },
+      { header: "User ID", key: "userId" },
+      { header: "User Name", key: "userName" },
+      { header: "User Email", key: "userEmail" },
+      { header: "Project ID", key: "projectId" },
+      { header: "Project Name", key: "projectName" },
+      { header: "Total Score", key: "totalScore" },
+      { header: "Maximum Score", key: "maximumScore" },
+      { header: "Percentage", key: "percentage" },
+      { header: "Question Count", key: "questionCount" },
+      { header: "Overall Remarks", key: "remarks" },
+      { header: "Evaluated At", key: "evaluatedAt" },
+      { header: "Created At", key: "createdAt" },
+      { header: "Updated At", key: "updatedAt" },
+    ];
+
+    const answerSheet = workbook.addWorksheet("Performance Answers");
+    answerSheet.columns = [
+      { header: "Answer ID", key: "answerId" },
+      { header: "Review ID", key: "reviewId" },
+      { header: "User ID", key: "userId" },
+      { header: "User Name", key: "userName" },
+      { header: "User Email", key: "userEmail" },
+      { header: "Project ID", key: "projectId" },
+      { header: "Project Name", key: "projectName" },
+      { header: "Question Number", key: "questionNumber" },
+      { header: "Question ID", key: "questionId" },
+      { header: "Question", key: "question" },
+      { header: "Score", key: "score" },
+      { header: "Maximum Score", key: "maximumScore" },
+      { header: "Question Percentage", key: "percentage" },
+      { header: "Answer Remark", key: "remark" },
+      { header: "Answer Created At", key: "createdAt" },
+      { header: "Answer Updated At", key: "updatedAt" },
+    ];
+
+    for (const user of users) {
+      const projectStatuses = user.projects.map((assignment) => ({
+        assignment,
+        status: getProjectStatus(assignment.project),
+      }));
+
+      const activeProjects = projectStatuses.filter(
+        ({ status: projectStatus }) =>
+          projectStatus === "In progress" || projectStatus === "Not started",
+      ).length;
+
+      const completedProjects = projectStatuses.filter(
+        ({ status: projectStatus }) => projectStatus === "Completed",
+      ).length;
+
+      const overdueProjects = projectStatuses.filter(
+        ({ status: projectStatus }) => projectStatus === "Overdue",
+      ).length;
+
+      const totalTarget = user.projects.reduce(
+        (sum, assignment) => sum + assignment.project.target,
+        0,
+      );
+
+      const totalReceived = user.projects.reduce(
+        (sum, assignment) => sum + assignment.project.received,
+        0,
+      );
+
+      const totalCompleted = user.projects.reduce(
+        (sum, assignment) => sum + assignment.project.completed,
+        0,
+      );
+
+      const activeProgressEntries = user.progressEntries.filter(
+        (entry) => entry.status === "ACTIVE",
+      );
+
+      const userContribution = activeProgressEntries
+        .filter((entry) => entry.category === "PROJECT")
+        .reduce((sum, entry) => sum + entry.quantity, 0);
+
+      const competitionContribution = activeProgressEntries
+        .filter((entry) => entry.category === "COMPETITION")
+        .reduce((sum, entry) => sum + entry.quantity, 0);
+
+      const reviewPercentages = user.performances.map((review) => {
+        const maximumScore = review.answers.reduce(
+          (sum, answer) => sum + answer.question.maxScore,
+          0,
+        );
+
+        return calculatePercentage(review.totalScore, maximumScore);
+      });
+
+      const averagePerformance =
+        reviewPercentages.length > 0
+          ? Number(
+              (
+                reviewPercentages.reduce(
+                  (sum, percentage) => sum + percentage,
+                  0,
+                ) / reviewPercentages.length
+              ).toFixed(2),
+            )
+          : 0;
+
+      summarySheet.addRow({
+        userId: user.id,
+        name: user.name || "",
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+        assignedProjects: user.projects.length,
+        activeProjects,
+        completedProjects,
+        overdueProjects,
+        totalTarget,
+        totalReceived,
+        projectCompleted: totalCompleted,
+        userContribution,
+        competitionContribution,
+        progressEntries: user.progressEntries.length,
+        performanceReviews: user.performances.length,
+        averagePerformance,
+        lastAssignment: user.projects[0]?.assignedAt || null,
+        lastProgress: user.progressEntries[0]?.createdAt || null,
+        lastReview: user.performances[0]?.evaluatedAt || null,
+      });
+
+      for (const assignment of user.projects) {
+        const project = assignment.project;
+
+        assignmentSheet.addRow({
+          assignmentId: assignment.id,
+          assignedAt: assignment.assignedAt,
+          userId: user.id,
+          userName: user.name || "",
+          userEmail: user.email,
+          role: user.role,
+          userStatus: user.status,
+          projectId: project.id,
+          projectName: project.name,
+          description: project.description || "",
+          deadline: project.deadline,
+          projectStatus: getProjectStatus(project),
+          target: project.target,
+          received: project.received,
+          completed: project.completed,
+          progress: calculatePercentage(project.completed, project.target),
+          remainingReceived: Math.max(project.received - project.completed, 0),
+          competition: project.competition ? "Yes" : "No",
+          competitionTarget: project.competitionTarget,
+          competitionReceived: project.competitionReceived,
+          competitionCompleted: project.competitionCompleted,
+          competitionProgress: calculatePercentage(
+            project.competitionCompleted,
+            project.competitionTarget,
+          ),
+          projectCreatedAt: project.createdAt,
+          projectUpdatedAt: project.updatedAt,
+        });
+      }
+
+      for (const entry of user.progressEntries) {
+        progressSheet.addRow({
+          entryId: entry.id,
+          workDate: entry.workDate,
+          submittedAt: entry.createdAt,
+          updatedAt: entry.updatedAt,
+          userId: user.id,
+          userName: user.name || "",
+          userEmail: user.email,
+          projectId: entry.project.id,
+          projectName: entry.project.name,
+          category: entry.category,
+          quantity: entry.quantity,
+          source: entry.source,
+          status: entry.status,
+          targetSnapshot: entry.targetSnapshot,
+          receivedSnapshot: entry.receivedSnapshot,
+          completedBefore: entry.completedBefore,
+          completedAfter: entry.completedAfter,
+          note: entry.note || "",
+          clientRequestId: entry.clientRequestId || "",
+          createdById: entry.createdBy?.id || entry.createdById || "",
+          createdByName: entry.createdBy?.name || "",
+          createdByEmail: entry.createdBy?.email || "",
+          submittedIp: entry.submittedIp || "",
+          submittedUserAgent: entry.submittedUserAgent || "",
+          voidedAt: entry.voidedAt,
+          voidedById: entry.voidedBy?.id || entry.voidedById || "",
+          voidedByName: entry.voidedBy?.name || "",
+          voidedByEmail: entry.voidedBy?.email || "",
+          voidReason: entry.voidReason || "",
+        });
+      }
+
+      for (const review of user.performances) {
+        const maximumScore = review.answers.reduce(
+          (sum, answer) => sum + answer.question.maxScore,
+          0,
+        );
+
+        const percentage = calculatePercentage(review.totalScore, maximumScore);
+
+        reviewSheet.addRow({
+          reviewId: review.id,
+          userId: user.id,
+          userName: user.name || "",
+          userEmail: user.email,
+          projectId: review.project.id,
+          projectName: review.project.name,
+          totalScore: review.totalScore,
+          maximumScore,
+          percentage,
+          questionCount: review.answers.length,
+          remarks: review.remarks || "",
+          evaluatedAt: review.evaluatedAt,
+          createdAt: review.createdAt,
+          updatedAt: review.updatedAt,
+        });
+
+        review.answers.forEach((answer, answerIndex) => {
+          answerSheet.addRow({
+            answerId: answer.id,
+            reviewId: review.id,
+            userId: user.id,
+            userName: user.name || "",
+            userEmail: user.email,
+            projectId: review.project.id,
+            projectName: review.project.name,
+            questionNumber: answerIndex + 1,
+            questionId: answer.question.id,
+            question: answer.question.question,
+            score: answer.score,
+            maximumScore: answer.question.maxScore,
+            percentage: calculatePercentage(
+              answer.score,
+              answer.question.maxScore,
+            ),
+            remark: answer.remark || "",
+            createdAt: answer.createdAt,
+            updatedAt: answer.updatedAt,
+          });
+        });
+      }
+    }
+
+    styleWorksheet(
+      summarySheet,
+      "Users Summary",
+      "One row per user with account information, assignment workload, project totals, progress contribution and performance summary.",
+      [
+        38, 24, 34, 12, 12, 20, 20, 16, 14, 16, 14, 14, 14, 16, 20, 24, 16, 18,
+        20, 20, 20, 22,
+      ],
+    );
+
+    styleWorksheet(
+      assignmentSheet,
+      "Project Assignments",
+      "One row per user-project assignment with the complete current project status and target information.",
+      [
+        38, 20, 38, 24, 34, 12, 13, 38, 30, 45, 16, 16, 12, 12, 12, 12, 18, 13,
+        18, 20, 20, 22, 20, 20,
+      ],
+    );
+
+    styleWorksheet(
+      progressSheet,
+      "Progress History",
+      "Append-only progress audit history showing who submitted each quantity, snapshots, device information and void details.",
+      [
+        38, 16, 20, 20, 38, 24, 34, 38, 30, 15, 12, 12, 12, 16, 18, 18, 18, 45,
+        38, 38, 24, 34, 18, 55, 20, 38, 24, 34, 45,
+      ],
+    );
+
+    styleWorksheet(
+      reviewSheet,
+      "Performance Reviews",
+      "One row per user performance evaluation, including calculated maximum score and percentage.",
+      [38, 38, 24, 34, 38, 30, 14, 16, 14, 15, 50, 20, 20, 20],
+    );
+
+    styleWorksheet(
+      answerSheet,
+      "Performance Answers",
+      "Question-level detail for every performance evaluation.",
+      [38, 38, 38, 24, 34, 38, 30, 16, 38, 60, 12, 16, 20, 45, 20, 20],
+    );
+
+    for (const worksheet of [
+      summarySheet,
+      assignmentSheet,
+      progressSheet,
+      reviewSheet,
+      answerSheet,
+    ]) {
+      worksheet.getRow(3).height = 5;
+    }
+
+    for (const columnNumber of [6, 7, 20, 21, 22]) {
+      summarySheet.getColumn(columnNumber).numFmt = "dd mmm yyyy, hh:mm";
+    }
+
+    for (const columnNumber of [2, 11, 23, 24]) {
+      assignmentSheet.getColumn(columnNumber).numFmt = "dd mmm yyyy, hh:mm";
+    }
+
+    for (const columnNumber of [2, 3, 4, 25]) {
+      progressSheet.getColumn(columnNumber).numFmt = "dd mmm yyyy, hh:mm";
+    }
+
+    for (const columnNumber of [12, 13, 14]) {
+      reviewSheet.getColumn(columnNumber).numFmt = "dd mmm yyyy, hh:mm";
+    }
+
+    for (const columnNumber of [15, 16]) {
+      answerSheet.getColumn(columnNumber).numFmt = "dd mmm yyyy, hh:mm";
+    }
+
+    for (const worksheet of [
+      summarySheet,
+      assignmentSheet,
+      progressSheet,
+      reviewSheet,
+      answerSheet,
+    ]) {
+      worksheet.getRow(4).eachCell((cell) => {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: HEADER_FILL },
+        };
+      });
+    }
+
+    const fileName = `user-management-${formatDateForFileName(generatedAt)}.xlsx`;
+    const buffer = await workbook.xlsx.writeBuffer();
+
+    res.setHeader("Content-Type", EXCEL_MIME_TYPE);
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.setHeader("Content-Length", Buffer.byteLength(Buffer.from(buffer)));
+    res.setHeader("Cache-Control", "no-store");
+
+    return res.status(200).send(Buffer.from(buffer));
+  } catch (error) {
+    console.error("Error exporting users to Excel:", error);
+
+    if (!res.headersSent) {
+      return res.status(500).json({
+        success: false,
+        error: "Failed to generate the user management Excel export.",
+      });
+    }
+
+    return res.end();
+  }
+};

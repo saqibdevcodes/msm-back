@@ -1,0 +1,224 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id       String     @id @default(uuid())
+  email    String     @unique
+  name     String?
+  password String
+  role     Role       @default(user)
+  token    String?    @db.Text
+  status   UserStatus @default(active)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  projects     ProjectUser[]
+  performances PerformanceEvaluation[]
+
+  progressEntries        ProjectProgressEntry[] @relation("ProgressWorker")
+  createdProgressEntries ProjectProgressEntry[] @relation("ProgressCreator")
+  voidedProgressEntries  ProjectProgressEntry[] @relation("ProgressVoider")
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  deadline    DateTime
+  description String?
+
+  target    Int @default(0)
+  received  Int @default(0)
+  completed Int @default(0)
+
+  competition          Boolean @default(false)
+  competitionTarget    Int     @default(0)
+  competitionReceived  Int     @default(0)
+  competitionCompleted Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users           ProjectUser[]
+  fieldResponses  FieldResponse[]
+  performances    PerformanceEvaluation[]
+  progressEntries ProjectProgressEntry[]
+}
+
+model ProjectProgressEntry {
+  id String @id @default(uuid())
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // User who performed the work.
+  userId      String?
+  user        User?   @relation("ProgressWorker", fields: [userId], references: [id], onDelete: SetNull)
+  // User/admin who entered the record.
+  createdById String?
+  createdBy   User?   @relation("ProgressCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  category ProgressCategory @default(PROJECT)
+
+  quantity Int
+
+  workDate DateTime @db.Date
+
+  note String? @db.Text
+
+  source ProgressSource @default(USER)
+
+  status ProgressEntryStatus @default(ACTIVE)
+
+  clientRequestId String? @unique
+
+  targetSnapshot   Int
+  receivedSnapshot Int
+  completedBefore  Int
+  completedAfter   Int
+
+  submittedIp        String?
+  submittedUserAgent String? @db.Text
+
+  voidedAt DateTime?
+
+  voidedById String?
+  voidedBy   User?   @relation("ProgressVoider", fields: [voidedById], references: [id], onDelete: SetNull)
+
+  voidReason String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
+  @@index([userId])
+  @@index([createdById])
+  @@index([projectId, workDate])
+  @@index([userId, workDate])
+  @@index([projectId, category, status])
+}
+
+enum ProgressCategory {
+  PROJECT
+  COMPETITION
+}
+
+enum ProgressSource {
+  USER
+  ADMIN
+  SYSTEM
+  IMPORT
+}
+
+enum ProgressEntryStatus {
+  ACTIVE
+  VOIDED
+}
+
+model ProjectUser {
+  id        String @id @default(uuid())
+  projectId String
+  userId    String
+
+  user    User    @relation(fields: [userId], references: [id])
+  project Project @relation(fields: [projectId], references: [id])
+
+  assignedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([projectId, userId])
+  @@index([projectId])
+  @@index([userId])
+}
+
+model MysteryShoppingType {
+  id   String @id @default(uuid())
+  type String @default("General")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model FieldResponse {
+  id           String @id @default(uuid())
+  receivedFrom String
+  quantity     Int
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
+}
+
+model PerformanceEvaluation {
+  id String @id @default(uuid())
+
+  userId    String
+  projectId String
+
+  totalScore Int     @default(0)
+  remarks    String? @db.Text
+
+  user    User    @relation(fields: [userId], references: [id])
+  project Project @relation(fields: [projectId], references: [id])
+
+  answers PerformanceAnswer[]
+
+  evaluatedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+  @@index([projectId])
+}
+
+model PerformanceQuestion {
+  id       String @id @default(uuid())
+  question String
+  maxScore Int    @default(5)
+
+  answers PerformanceAnswer[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model PerformanceAnswer {
+  id String @id @default(uuid())
+
+  evaluationId String
+  questionId   String
+
+  score  Int
+  remark String? @db.Text
+
+  evaluation PerformanceEvaluation @relation(fields: [evaluationId], references: [id])
+  question   PerformanceQuestion   @relation(fields: [questionId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([evaluationId])
+  @@index([questionId])
+}
+
+enum UserStatus {
+  active
+  inactive
+}
+
+enum Role {
+  admin
+  user
+  field
+}
