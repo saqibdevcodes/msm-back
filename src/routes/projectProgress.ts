@@ -3,12 +3,15 @@ import { Router } from "express";
 import {
   addMyProjectProgress,
   getMyProjectProgress,
+  getAdminProjectProgress,
   voidProjectProgressEntry,
 } from "../controllers/projectProgress.ts";
 
 import { adminMiddleware, authMiddleware } from "../middlewares/auth.ts";
 
 const router = Router();
+
+router.get("/projects/:projectId/progress", authMiddleware, getAdminProjectProgress);
 
 router.post(
   "/me/projects/:projectId/progress",

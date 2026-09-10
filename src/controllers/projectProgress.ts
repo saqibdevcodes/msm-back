@@ -85,14 +85,17 @@ const parseWorkDate = (value: unknown) => {
 
   const date = new Date(`${normalized}T00:00:00.000Z`);
 
-  return Number.isNaN(date.getTime()) ? null : date;
+  return Number.isNaN(date.getTime()) ||
+    date.toISOString().slice(0, 10) !== normalized
+    ? null
+    : date;
 };
 
 const getRequestIp = (req: Request) => {
   const forwarded = req.headers["x-forwarded-for"];
 
   if (typeof forwarded === "string") {
-    return forwarded.split(",")[0].trim();
+    return forwarded.split(",")[0]?.trim() || null;
   }
 
   return req.ip || null;
@@ -116,7 +119,7 @@ export const addMyProjectProgress = async (req: Request, res: Response) => {
       });
     }
 
-    const { projectId } = req.params;
+    const { projectId } = req.params as { projectId: string };
 
     const {
       quantity,
@@ -128,7 +131,12 @@ export const addMyProjectProgress = async (req: Request, res: Response) => {
 
     const parsedQuantity = Number(quantity);
 
-    if (!Number.isInteger(parsedQuantity) || parsedQuantity <= 0) {
+    if (
+      (typeof quantity !== "number" && typeof quantity !== "string") ||
+      !Number.isSafeInteger(parsedQuantity) ||
+      parsedQuantity <= 0 ||
+      parsedQuantity > 2147483647
+    ) {
       return res.status(400).json({
         success: false,
         error: "Quantity must be a positive whole number.",
@@ -194,23 +202,35 @@ export const addMyProjectProgress = async (req: Request, res: Response) => {
       });
     }
 
-    if (clientRequestId && typeof clientRequestId === "string") {
-      const existingEntry = await prisma.projectProgressEntry.findUnique({
-        where: {
-          clientRequestId,
-        },
-      });
-
-      if (existingEntry) {
-        return res.status(200).json({
-          success: true,
-          message: "Progress was already submitted.",
-          data: existingEntry,
-        });
-      }
-    }
-
     const result = await prisma.$transaction(async (tx) => {
+      // Serialize updates for a project so two workers cannot complete the same
+      // remaining balance. The lock is held until both the entry and total commit.
+      await tx.$queryRaw`SELECT "id" FROM "Project" WHERE "id" = ${projectId} FOR UPDATE`;
+      const requestId =
+        typeof clientRequestId === "string" ? clientRequestId.trim() : "";
+      if (requestId) {
+        const existingEntry = await tx.projectProgressEntry.findUnique({
+          where: { clientRequestId: requestId },
+        });
+        if (existingEntry) {
+          if (
+            existingEntry.projectId !== projectId ||
+            existingEntry.userId !== user.id ||
+            existingEntry.quantity !== parsedQuantity ||
+            existingEntry.category !== category ||
+            existingEntry.workDate.getTime() !== parsedWorkDate.getTime() ||
+            existingEntry.note !==
+              (typeof note === "string" && note.trim() ? note.trim() : null)
+          ) {
+            throw new Error("REQUEST_ID_CONFLICT");
+          }
+          return {
+            entry: existingEntry,
+            project: await tx.project.findUnique({ where: { id: projectId } }),
+            alreadySubmitted: true,
+          };
+        }
+      }
       const project = await tx.project.findUnique({
         where: {
           id: projectId,
@@ -321,13 +341,20 @@ export const addMyProjectProgress = async (req: Request, res: Response) => {
       };
     });
 
-    return res.status(201).json({
+    return res.status("alreadySubmitted" in result ? 200 : 201).json({
       success: true,
-      message: "Project progress submitted successfully.",
+      message: "alreadySubmitted" in result
+        ? "Progress was already submitted."
+        : "Project progress submitted successfully.",
       data: result,
     });
   } catch (error) {
     console.error("Error adding project progress:", error);
+
+    if ((error instanceof Error && error.message === "REQUEST_ID_CONFLICT") ||
+        (typeof error === "object" && error !== null && "code" in error && error.code === "P2002")) {
+      return res.status(409).json({ success: false, error: "This submission ID has already been used for different work. Refresh and try again." });
+    }
 
     if (error instanceof Error && error.message === "PROJECT_NOT_FOUND") {
       return res.status(404).json({
@@ -360,7 +387,10 @@ export const addMyProjectProgress = async (req: Request, res: Response) => {
     });
   }
 };
-export const getMyProjectProgress = async (req: Request, res: Response) => {
+export const getMyProjectProgress = async (req: Request, res: Response) => getProjectProgress(req, res, false);
+export const getAdminProjectProgress = async (req: Request, res: Response) => getProjectProgress(req, res, true);
+
+const getProjectProgress = async (req: Request, res: Response, adminOnly: boolean) => {
   try {
     const user = await findAuthenticatedUser(req);
 
@@ -371,7 +401,11 @@ export const getMyProjectProgress = async (req: Request, res: Response) => {
       });
     }
 
-    const { projectId } = req.params;
+    if (user.status !== "active" || (adminOnly && user.role !== "admin")) {
+      return res.status(403).json({ success: false, error: "Access denied." });
+    }
+
+    const { projectId } = req.params as { projectId: string };
 
     const assignment = await prisma.projectUser.findUnique({
       where: {
@@ -382,7 +416,7 @@ export const getMyProjectProgress = async (req: Request, res: Response) => {
       },
     });
 
-    if (!assignment) {
+    if (!adminOnly && !assignment) {
       return res.status(403).json({
         success: false,
         error: "You are not assigned to this project.",
@@ -403,6 +437,7 @@ export const getMyProjectProgress = async (req: Request, res: Response) => {
         competitionTarget: true,
         competitionReceived: true,
         competitionCompleted: true,
+        users: { select: { user: { select: { id: true, name: true, email: true } } } },
       },
     });
 
@@ -413,6 +448,12 @@ export const getMyProjectProgress = async (req: Request, res: Response) => {
       });
     }
 
+    const { users: assignedUsers, ...projectTotals } = project;
+    const page = Math.max(1, Math.floor(Number(req.query.page) || 1));
+    const limit = Math.min(200, Math.max(1, Math.floor(Number(req.query.limit) || 200)));
+    if (!Number.isSafeInteger(page) || !Number.isSafeInteger((page - 1) * limit)) {
+      return res.status(400).json({ success: false, error: "Invalid page." });
+    }
     const entries = await prisma.projectProgressEntry.findMany({
       where: {
         projectId,
@@ -442,28 +483,27 @@ export const getMyProjectProgress = async (req: Request, res: Response) => {
       },
       orderBy: [
         {
-          workDate: "desc",
-        },
-        {
           createdAt: "desc",
         },
+        {
+          id: "desc",
+        },
       ],
-      take: 200,
+      take: limit,
+      skip: (page - 1) * limit,
     });
 
-    const activeEntries = entries.filter((entry) => entry.status === "ACTIVE");
-
-    const myProjectCompleted = activeEntries
-      .filter(
-        (entry) => entry.userId === user.id && entry.category === "PROJECT",
-      )
-      .reduce((total, entry) => total + entry.quantity, 0);
-
-    const myCompetitionCompleted = activeEntries
-      .filter(
-        (entry) => entry.userId === user.id && entry.category === "COMPETITION",
-      )
-      .reduce((total, entry) => total + entry.quantity, 0);
+    // Totals must cover all history, including entries outside the current page.
+    const grouped = await prisma.projectProgressEntry.groupBy({
+      by: ["userId", "category"],
+      where: { projectId, status: "ACTIVE" },
+      _sum: { quantity: true },
+      _count: { _all: true },
+    });
+    const contributors = await prisma.user.findMany({
+      where: { id: { in: grouped.flatMap((entry) => entry.userId ? [entry.userId] : []) } },
+      select: { id: true, name: true, email: true },
+    });
 
     const teamMap = new Map<
       string,
@@ -477,25 +517,31 @@ export const getMyProjectProgress = async (req: Request, res: Response) => {
       }
     >();
 
-    activeEntries.forEach((entry) => {
+    assignedUsers.forEach(({ user: member }) => {
+      teamMap.set(member.id, { userId: member.id, name: member.name || member.email,
+        email: member.email, projectCompleted: 0, competitionCompleted: 0, entries: 0 });
+    });
+
+    grouped.forEach((entry) => {
       const key = entry.userId || "system";
+      const contributor = contributors.find((member) => member.id === entry.userId);
 
       const current = teamMap.get(key) ?? {
         userId: entry.userId,
-        name: entry.user?.name || "System opening balance",
-        email: entry.user?.email || null,
+        name: contributor?.name || contributor?.email || "Unattributed / deleted user",
+        email: contributor?.email || null,
         projectCompleted: 0,
         competitionCompleted: 0,
         entries: 0,
       };
 
       if (entry.category === "PROJECT") {
-        current.projectCompleted += entry.quantity;
+        current.projectCompleted += entry._sum.quantity ?? 0;
       } else {
-        current.competitionCompleted += entry.quantity;
+        current.competitionCompleted += entry._sum.quantity ?? 0;
       }
 
-      current.entries += 1;
+      current.entries += entry._count._all;
 
       teamMap.set(key, current);
     });
@@ -504,19 +550,18 @@ export const getMyProjectProgress = async (req: Request, res: Response) => {
       success: true,
       message: "Project progress history retrieved successfully.",
       data: {
-        project,
+        project: projectTotals,
 
         mySummary: {
-          projectCompleted: myProjectCompleted,
-          competitionCompleted: myCompetitionCompleted,
-          totalEntries: activeEntries.filter(
-            (entry) => entry.userId === user.id,
-          ).length,
+          projectCompleted: teamMap.get(user.id)?.projectCompleted ?? 0,
+          competitionCompleted: teamMap.get(user.id)?.competitionCompleted ?? 0,
+          totalEntries: teamMap.get(user.id)?.entries ?? 0,
         },
 
         teamSummary: Array.from(teamMap.values()),
 
         entries,
+        pagination: { page, limit, total: await prisma.projectProgressEntry.count({ where: { projectId } }) },
       },
     });
   } catch (error) {
@@ -532,14 +577,14 @@ export const voidProjectProgressEntry = async (req: Request, res: Response) => {
   try {
     const admin = await findAuthenticatedUser(req);
 
-    if (!admin || admin.role !== "admin") {
+    if (!admin || admin.role !== "admin" || admin.status !== "active") {
       return res.status(403).json({
         success: false,
         error: "Only administrators can void progress entries.",
       });
     }
 
-    const { entryId } = req.params;
+    const { entryId } = req.params as { entryId: string };
     const { reason } = req.body;
 
     if (typeof reason !== "string" || !reason.trim()) {
@@ -550,6 +595,8 @@ export const voidProjectProgressEntry = async (req: Request, res: Response) => {
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      // Lock the project first, using the same lock order as new submissions.
+      await tx.$queryRaw`SELECT "id" FROM "Project" WHERE "id" = (SELECT "projectId" FROM "ProjectProgressEntry" WHERE "id" = ${entryId}) FOR UPDATE`;
       const entry = await tx.projectProgressEntry.findUnique({
         where: {
           id: entryId,
@@ -563,6 +610,10 @@ export const voidProjectProgressEntry = async (req: Request, res: Response) => {
       if (entry.status === "VOIDED") {
         throw new Error("ENTRY_ALREADY_VOIDED");
       }
+
+      const currentProject = await tx.project.findUniqueOrThrow({ where: { id: entry.projectId } });
+      const completed = entry.category === "PROJECT" ? currentProject.completed : currentProject.competitionCompleted;
+      if (entry.quantity > completed) throw new Error("INVALID_BALANCE");
 
       const project = await tx.project.update({
         where: {
@@ -607,6 +658,10 @@ export const voidProjectProgressEntry = async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error("Error voiding progress entry:", error);
+
+    if (error instanceof Error && error.message === "INVALID_BALANCE") {
+      return res.status(409).json({ success: false, error: "This entry exceeds the current completed balance and cannot be voided." });
+    }
 
     if (error instanceof Error && error.message === "ENTRY_NOT_FOUND") {
       return res.status(404).json({

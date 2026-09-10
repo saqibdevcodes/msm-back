@@ -768,9 +768,13 @@ export const updateProject = async (req: Request, res: Response) => {
       }
     }
 
-    await prisma.project.update({
+    // Match the completed balances seen by the editor. A concurrent worker
+    // update must never be overwritten by an older project form.
+    const updateResult = await prisma.project.updateMany({
       where: {
         id,
+        completed: completedResult.value ?? 0,
+        competitionCompleted: competitionCompletedResult.value ?? 0,
       },
 
       data: {
@@ -786,8 +790,6 @@ export const updateProject = async (req: Request, res: Response) => {
 
         received: receivedResult.value ?? 0,
 
-        completed: completedResult.value ?? 0,
-
         competition: hasCompetition,
 
         competitionTarget: hasCompetition
@@ -798,11 +800,12 @@ export const updateProject = async (req: Request, res: Response) => {
           ? (competitionReceivedResult.value ?? 0)
           : 0,
 
-        competitionCompleted: hasCompetition
-          ? (competitionCompletedResult.value ?? 0)
-          : 0,
       },
     });
+
+    if (updateResult.count === 0) {
+      return res.status(409).json({ success: false, error: "Completed totals are maintained by work updates. Progress has changed; reopen the project to load the latest totals before saving." });
+    }
 
     let assignmentResult: Awaited<
       ReturnType<typeof syncProjectAssignments>
