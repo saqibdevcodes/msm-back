@@ -48,6 +48,6 @@
     "moduleDetection": "force",
     "skipLibCheck": true,
   },
-  "include": ["index.ts", "src/**/*.ts", "generated/prisma/**/*.ts"],
+  "include": ["index.ts", "src/**/*.ts", "prisma/seed.ts", "generated/prisma/**/*.ts"],
   "exclude": ["node_modules", "dist", "tests"]
 }
