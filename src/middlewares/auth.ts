@@ -2,11 +2,15 @@ import type { Request, Response, NextFunction } from "express";
 import jwt, { type JwtPayload } from "jsonwebtoken";
 import { prisma } from "../lib/prisma";
 
-const secret = process.env.JWT_SECRET;
+const secret = (() => {
+  const value = process.env.JWT_SECRET;
 
-if (!secret) {
-  throw new Error("JWT_SECRET is not defined");
-}
+  if (!value) {
+    throw new Error("JWT_SECRET is not defined");
+  }
+
+  return value;
+})();
 
 export interface AuthRequest extends Request {
   user?: string | JwtPayload;

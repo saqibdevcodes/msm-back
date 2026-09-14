@@ -1077,7 +1077,7 @@ export const exportFieldResponsesExcel = async (
           paperSize: 9,
         };
 
-        worksheet.pageMargins = {
+        worksheet.pageSetup.margins = {
           left: 0.25,
           right: 0.25,
           top: 0.5,

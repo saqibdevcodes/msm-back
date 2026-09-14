@@ -174,18 +174,24 @@ export const getAdminDashboard = async (_req: Request, res: Response) => {
       }
 
       const monthIndex = deadline.getMonth();
+      const monthlyProject = monthlyProjects[monthIndex];
+      const monthlyReport = monthlyReports[monthIndex];
 
-      monthlyProjects[monthIndex].projects += 1;
-
-      if (project.status === "completed") {
-        monthlyProjects[monthIndex].completed += 1;
+      if (!monthlyProject || !monthlyReport) {
+        return;
       }
 
-      monthlyReports[monthIndex].target += project.target;
+      monthlyProject.projects += 1;
 
-      monthlyReports[monthIndex].received += project.received;
+      if (project.status === "completed") {
+        monthlyProject.completed += 1;
+      }
 
-      monthlyReports[monthIndex].completed += project.completed;
+      monthlyReport.target += project.target;
+
+      monthlyReport.received += project.received;
+
+      monthlyReport.completed += project.completed;
     });
 
     const statusCounts: Record<ProjectStatus, number> = {

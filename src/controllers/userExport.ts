@@ -454,9 +454,9 @@ export const exportUsersExcel = async (req: Request, res: Response) => {
     addExportInfoSheet(workbook, {
       generatedAt,
       generatedBy,
-      search,
-      status,
-      role,
+      ...(search !== undefined ? { search } : {}),
+      ...(status !== undefined ? { status } : {}),
+      ...(role !== undefined ? { role } : {}),
       selectedIds,
       userCount: users.length,
     });

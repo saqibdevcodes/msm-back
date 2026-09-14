@@ -154,12 +154,12 @@ export const createPerformanceEvaluation = async (
         userId,
         projectId,
         totalScore,
-        remarks,
+        ...(remarks !== undefined ? { remarks } : {}),
         answers: {
           create: answers.map((answer) => ({
             questionId: answer.questionId as string,
             score: answer.score as number,
-            remark: answer.remark,
+            ...(answer.remark !== undefined ? { remark: answer.remark } : {}),
           })),
         },
       },

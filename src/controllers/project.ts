@@ -611,17 +611,18 @@ export const createProject = async (req: Request, res: Response) => {
         competitionCompleted: hasCompetition
           ? (competitionCompletedResult.value ?? 0)
           : 0,
-        users:
-          normalizedUserIds.length > 0
-            ? {
+        ...(normalizedUserIds.length > 0
+          ? {
+              users: {
                 createMany: {
                   data: normalizedUserIds.map((userId) => ({
                     userId,
                   })),
                   skipDuplicates: true,
                 },
-              }
-            : undefined,
+              },
+            }
+          : {}),
       },
       include: projectInclude,
     });
